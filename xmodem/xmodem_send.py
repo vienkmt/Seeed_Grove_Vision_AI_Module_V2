@@ -205,16 +205,16 @@ def xmodem_send_bin():
         wb.write(bytearray(header))
         wb.close()
 
-        print("xmodem_sending >>", preamble_data)
+        print("xmodem_sending modellllll >>", preamble_data)
         send_bin_total_packtets = math.ceil(os.path.getsize(preamble_data_filepath) / packtet_size)
         stream = open(preamble_data_filepath, 'rb')
         ret = modem.send(stream, callback=callback)
         stream.close()
 
         if (ret) :
-            print("xmodem_send bin file done!!")
+            print("xmodem_send model bin file done!!")
         else :
-            print("xmodem_send bin file FAIL!!!!")
+            print("xmodem_send model bin file FAIL!!!!")
             return ret
 
         while(True):

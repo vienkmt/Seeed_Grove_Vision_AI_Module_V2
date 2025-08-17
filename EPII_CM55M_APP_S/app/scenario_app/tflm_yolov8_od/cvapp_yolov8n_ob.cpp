@@ -52,7 +52,7 @@
 #define YOLOV8_OB_INPUT_TENSOR_CHANNEL INPUT_IMAGE_CHANNELS
 #endif
 
-#define YOLOV8N_OB_DBG_APP_LOG 0
+#define YOLOV8N_OB_DBG_APP_LOG 1
 
 
 // #define EACH_STEP_TICK
@@ -160,6 +160,7 @@ int cv_yolov8n_ob_init(bool security_enable, bool privilege_enable, uint32_t mod
 		return -1;
 
 	if(model_addr != 0) {
+		xprintf("Loading YOLOv8 model from address: 0x%x\n", model_addr);
 		static const tflite::Model*yolov8n_ob_model = tflite::GetModel((const void *)model_addr);
 
 		if (yolov8n_ob_model->version() != TFLITE_SCHEMA_VERSION) {
@@ -170,7 +171,7 @@ int cv_yolov8n_ob_init(bool security_enable, bool privilege_enable, uint32_t mod
 			return -1;
 		}
 		else {
-			xprintf("yolov8n_ob model's schema version %d\n", yolov8n_ob_model->version());
+			xprintf("YOLOv8 model loaded successfully! Schema version: %d\n", yolov8n_ob_model->version());
 		}
 		#if TFLM2209_U55TAG2205
 		static tflite::MicroErrorReporter yolov8n_ob_micro_error_reporter;
@@ -192,13 +193,19 @@ int cv_yolov8n_ob_init(bool security_enable, bool privilege_enable, uint32_t mod
 
 
 		if(yolov8n_ob_static_interpreter.AllocateTensors()!= kTfLiteOk) {
+			xprintf("[ERROR] Failed to allocate tensors for YOLOv8!\n");
 			return false;
 		}
 		yolov8n_ob_int_ptr = &yolov8n_ob_static_interpreter;
 		yolov8n_ob_input = yolov8n_ob_static_interpreter.input(0);
 		yolov8n_ob_output = yolov8n_ob_static_interpreter.output(0);
+		
+		xprintf("Input tensor: %dx%dx%d\n", yolov8n_ob_input->dims->data[1], yolov8n_ob_input->dims->data[2], yolov8n_ob_input->dims->data[3]);
+		xprintf("Output tensor: %dx%dx%d\n", yolov8n_ob_output->dims->data[0], yolov8n_ob_output->dims->data[1], yolov8n_ob_output->dims->data[2]);
+		
 		#if CHANGE_YOLOV8_OB_OUPUT_SHAPE
 			yolov8n_ob_output2 = yolov8n_ob_static_interpreter.output(1);
+			xprintf("Output2 tensor: %dx%dx%d\n", yolov8n_ob_output2->dims->data[0], yolov8n_ob_output2->dims->data[1], yolov8n_ob_output2->dims->data[2]);
 		#endif
 	}
 
@@ -609,7 +616,7 @@ int cv_yolov8n_ob_run(struct_yolov8_ob_algoResult *algoresult_yolov8n_ob) {
 			SystemGetTick(&systick_1, &loop_cnt_1);
 		#endif
 		//retrieve output data
-		yolov8_ob_post_processing(yolov8n_ob_int_ptr,0.25, 0.45, algoresult_yolov8n_ob,el_algo);
+		yolov8_ob_post_processing(yolov8n_ob_int_ptr,0.05, 0.45, algoresult_yolov8n_ob,el_algo);
 		#ifdef EACH_STEP_TICK
 			SystemGetTick(&systick_2, &loop_cnt_2);
 			dbg_printf(DBG_LESS_INFO,"Tick for Invoke for YOLOV8_OB_post_processing:[%d]\r\n\n",(loop_cnt_2-loop_cnt_1)*CPU_CLK+(systick_1-systick_2));    

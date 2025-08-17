@@ -35,6 +35,19 @@
 #include "memory_manage.h"
 #include <send_result.h>
 
+#ifdef IP_gpio
+#include "hx_drv_gpio.h"
+#endif
+#include "hx_drv_scu.h"
+
+// LED Configuration - K2 maps to SEN_D2 which can be configured as GPIO20
+#define LED_GPIO_PIN    GPIO20
+
+// LED threshold - 60% confidence for person detection (YOLO class ID 0)
+// YOLO confidence typically 0.0-1.0, but need to check actual output format
+#define PERSON_DETECTION_CONFIDENCE_THRESHOLD  0.6f
+#define PERSON_CLASS_ID  0  // COCO dataset person class ID
+
 #define YOLO11_NO_POST_SEPARATE_OUTPUT 1
 
 #define INPUT_IMAGE_CHANNELS 3
@@ -445,6 +458,57 @@ void print_model_info(tflite::MicroInterpreter * static_interpreter_ptr)
 	}
 	return ;
 }
+
+// LED initialization function
+static void led_init(void)
+{
+#ifdef IP_gpio
+    // Configure pinmux for LED - K2 corresponds to SEN_D2 pin
+    // Map SEN_D2 to GPIO20 function
+    hx_drv_scu_set_SEN_D2_pinmux(SCU_SEN_D2_PINMUX_GPIO20);
+    
+    // Configure GPIO20 as output
+    hx_drv_gpio_set_output(LED_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+    
+    xprintf("LED GPIO initialized on K2 (SEN_D2 -> GPIO20) for YOLO11\n");
+#else
+    xprintf("GPIO support not enabled\n");
+#endif
+}
+
+// LED control function based on YOLO11 person detection
+static void led_control_yolo11(struct_yolov8_ob_algoResult *result)
+{
+#ifdef IP_gpio
+    bool person_detected = false;
+    float max_person_confidence = 0.0f;
+    
+    // Check all detected objects for person (class_idx == 0)
+    for (int i = 0; i < MAX_TRACKED_YOLOV8_ALGO_RES; i++) {
+        if (result->obr[i].class_idx == PERSON_CLASS_ID && 
+            result->obr[i].confidence > PERSON_DETECTION_CONFIDENCE_THRESHOLD) {
+            person_detected = true;
+            if (result->obr[i].confidence > max_person_confidence) {
+                max_person_confidence = result->obr[i].confidence;
+            }
+        }
+    }
+    
+    if (person_detected) {
+        // Person detected with >60% confidence - Turn ON LED
+        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
+        xprintf("LED ON (K2/SEN_D2) - YOLO11 Person detected (max conf: %.2f, >%.1f)\n", 
+                max_person_confidence, PERSON_DETECTION_CONFIDENCE_THRESHOLD);
+    } else {
+        // No person detected with sufficient confidence - Turn OFF LED
+        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+        xprintf("LED OFF (K2/SEN_D2) - YOLO11 No person detected (threshold: %.1f)\n", 
+                PERSON_DETECTION_CONFIDENCE_THRESHOLD);
+    }
+#endif
+}
+
 int cv_yolo11n_ob_init(bool security_enable, bool privilege_enable, uint32_t model_addr) {
 	#if YOLO11_NO_POST_SEPARATE_OUTPUT
 	int dim_stride = 8;
@@ -527,6 +591,9 @@ int cv_yolo11n_ob_init(bool security_enable, bool privilege_enable, uint32_t mod
 		yolo11n_ob_output = yolo11n_ob_static_interpreter.output(0);
 		#endif
 	}
+
+	// Initialize LED for person detection indication
+	led_init();
 
 	xprintf("initial done\n");
 	return ercode;
@@ -958,6 +1025,9 @@ int cv_yolo11n_ob_run(struct_yolov8_ob_algoResult *algoresult_yolo11n_ob) {
 		#if YOLO11N_OB_DBG_APP_LOG
 			xprintf("yolo11_ob_post_processing done\r\n");
 		#endif
+		
+		// Control LED based on YOLO11 person detection results
+		led_control_yolo11(algoresult_yolo11n_ob);
 		#ifdef TOTAL_STEP_TICK						
 			SystemGetTick(&systick_2, &loop_cnt_2);
 			// dbg_printf(DBG_LESS_INFO,"Tick for TOTAL YOLO11 OB:[%d]\r\n",(loop_cnt_2-loop_cnt_1)*CPU_CLK+(systick_1-systick_2));		

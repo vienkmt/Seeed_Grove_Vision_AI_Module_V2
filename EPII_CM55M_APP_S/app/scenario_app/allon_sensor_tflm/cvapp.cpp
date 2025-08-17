@@ -1,7 +1,7 @@
 /*
  * cvapp.cpp
  *
- *  Created on: 2022¦~11¤ë18¤é
+ *  Created on: 2022ï¿½~11ï¿½ï¿½18ï¿½ï¿½
  *      Author: 902452
  */
 
@@ -28,9 +28,20 @@
 
 #include "xprintf.h"
 #include "cisdp_cfg.h"
+#ifdef IP_gpio
+#include "hx_drv_gpio.h"
+#endif
+#include "hx_drv_scu.h"
 
 #include "person_detect_model_data_vela.h"
 #include "common_config.h"
+
+// LED Configuration - K2 maps to SEN_D2 which can be configured as GPIO20
+#define LED_GPIO_PIN    GPIO20
+
+// LED threshold - 70% confidence for person detection
+// With int8 range (-128 to +127), 70% â‰ˆ +55
+#define PERSON_DETECTION_THRESHOLD  55
 
 #define LOCAL_FRAQ_BITS (8)
 #define SC(A, B) ((A<<8)/B)
@@ -158,6 +169,42 @@ static int _arm_npu_init(bool security_enable, bool privilege_enable)
     return 0;
 }
 
+// LED initialization function
+static void led_init(void)
+{
+#ifdef IP_gpio
+    // Configure pinmux for LED - K2 corresponds to SEN_D2 pin
+    // Map SEN_D2 to GPIO20 function
+    hx_drv_scu_set_SEN_D2_pinmux(SCU_SEN_D2_PINMUX_GPIO20);
+    
+    // Configure GPIO20 as output
+    hx_drv_gpio_set_output(LED_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+    
+    xprintf("LED GPIO initialized on K2 (SEN_D2 -> GPIO20)\n");
+#else
+    xprintf("GPIO support not enabled\n");
+#endif
+}
+
+// LED control function based on person detection
+static void led_control(int8_t person_score)
+{
+#ifdef IP_gpio
+    if (person_score > PERSON_DETECTION_THRESHOLD) {
+        // Person detected with 70%+ confidence - Turn ON LED
+        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
+        xprintf("LED ON (K2/SEN_D2) - High confidence person (score: %d, >%d)\n", 
+                person_score, PERSON_DETECTION_THRESHOLD);
+    } else {
+        // Low confidence or no person - Turn OFF LED  
+        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+        xprintf("LED OFF (K2/SEN_D2) - Low confidence (score: %d, <=%d)\n", 
+                person_score, PERSON_DETECTION_THRESHOLD);
+    }
+#endif
+}
+
 int cv_init(bool security_enable, bool privilege_enable)
 {
 	int ercode = 0;
@@ -199,6 +246,9 @@ int cv_init(bool security_enable, bool privilege_enable)
 	input = static_interpreter.input(0);
 	output = static_interpreter.output(0);
 
+	// Initialize LED for person detection indication
+	led_init();
+
 	xprintf("initial done\n");
 
 	return ercode;
@@ -206,6 +256,11 @@ int cv_init(bool security_enable, bool privilege_enable)
 
 int cv_run() {
 	int ercode = 0;
+	
+	// Timing measurement
+	uint32_t start_time = hx_drv_timer_cm55x_get_current_time_us();
+	static uint32_t frame_count = 0;
+	static uint32_t last_fps_time = 0;
 
 	//give image to input tensor
 	img_rescale((uint8_t*)app_get_raw_addr(), app_get_raw_width(), app_get_raw_height(), INPUT_SIZE_X, INPUT_SIZE_Y,
@@ -226,6 +281,10 @@ int cv_run() {
 	int8_t no_person_score = output->data.int8[0];
 
 	xprintf("person_score:%d\n",person_score);
+	
+	// Control LED based on person detection
+	led_control(person_score);
+	
 	//error_reporter->Report(
 	//	   "person score: %d, no person score: %d\n", person_score,
 	//	   no_person_score);
