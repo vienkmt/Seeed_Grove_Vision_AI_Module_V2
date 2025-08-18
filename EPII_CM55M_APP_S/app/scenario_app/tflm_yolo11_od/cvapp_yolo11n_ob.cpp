@@ -40,13 +40,24 @@
 #endif
 #include "hx_drv_scu.h"
 
-// LED Configuration - K2 maps to SEN_D2 which can be configured as GPIO20
+//Config cho LED và 2 chân IO PA2 - PA3
 #define LED_GPIO_PIN    GPIO20
+// PA2 and PA3 GPIO Configuration
+#define PA2_GPIO_PIN    SB_GPIO0    // PA2 can be configured as SB_GPIO0
+#define PA3_GPIO_PIN    SB_GPIO1    // PA3 can be configured as SB_GPIO1
 
+//Độ tin cậy 50%
 // LED threshold - 60% confidence for person detection (YOLO class ID 0)
 // YOLO confidence typically 0.0-1.0, but need to check actual output format
-#define PERSON_DETECTION_CONFIDENCE_THRESHOLD  0.6f
+#define PERSON_DETECTION_CONFIDENCE_THRESHOLD  0.5f
 #define PERSON_CLASS_ID  0  // COCO dataset person class ID
+
+// Counter thresholds for noise filtering (same as cvapp.cpp)
+#define PERSON_COUNTER_THRESHOLD    7  // Need 7 consecutive detections to turn GPIO on
+#define COUNTER_DECREMENT_STEP      1   // Decrement by 1 when no person detected
+
+// Tối ưu hóa chỉ cho Person Detection
+#define PERSON_ONLY_OPTIMIZATION    1   // Enable optimization for person class only (1=enable, 0=disable)
 
 #define YOLO11_NO_POST_SEPARATE_OUTPUT 1
 
@@ -106,13 +117,20 @@ int dim_total_size = 0;
 static float* stride_756_1;
 static float** anchor_756_2;
 #endif
+
 #if YOLO11N_OB_DBG_APP_LOG
+#if PERSON_ONLY_OPTIMIZATION
+// Tối ưu hóa: Chỉ giữ lại class "person" để tiết kiệm bộ nhớ
+std::string coco_classes[] = {"person"};
+int coco_ids[] = {1};
+#else
+// Danh sách đầy đủ các class của COCO dataset
 std::string coco_classes[] = {"person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"};
 int coco_ids[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31,
                       32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
                       57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85,
                       86, 87, 88, 89, 90};
-
+#endif
 #endif
 
 static void _arm_npu_irq_handler(void)
@@ -459,28 +477,46 @@ void print_model_info(tflite::MicroInterpreter * static_interpreter_ptr)
 	return ;
 }
 
-// LED initialization function
-static void led_init(void)
+// GPIO initialization function for LED, PA2, and PA3
+static void gpio_init(void)
 {
 #ifdef IP_gpio
     // Configure pinmux for LED - K2 corresponds to SEN_D2 pin
     // Map SEN_D2 to GPIO20 function
     hx_drv_scu_set_SEN_D2_pinmux(SCU_SEN_D2_PINMUX_GPIO20);
     
-    // Configure GPIO20 as output
+    // Configure PA2 pin as SB_GPIO0
+    hx_drv_scu_set_PA2_pinmux(SCU_PA2_PINMUX_SB_GPIO0, 1);
+    
+    // Configure PA3 pin as SB_GPIO1  
+    hx_drv_scu_set_PA3_pinmux(SCU_PA3_PINMUX_SB_GPIO1, 1);
+    
+    // Initialize GPIO Group 4 for SB_GPIO (PA2/PA3)
+    hx_drv_gpio_init(GPIO_GROUP_4, HX_GPIO_GROUP_4_BASE);
+    
+    // Configure all pins as output with initial low state
     hx_drv_gpio_set_output(LED_GPIO_PIN, GPIO_OUT_LOW);
     hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
     
-    xprintf("LED GPIO initialized on K2 (SEN_D2 -> GPIO20) for YOLO11\n");
+    hx_drv_gpio_set_output(PA2_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_LOW);
+    
+    hx_drv_gpio_set_output(PA3_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_LOW);
+    
+    xprintf("GPIO initialized: LED on K2 (SEN_D2->GPIO20), PA2->SB_GPIO0, PA3->SB_GPIO1 for YOLO11\n");
 #else
     xprintf("GPIO support not enabled\n");
 #endif
 }
 
-// LED control function based on YOLO11 person detection
-static void led_control_yolo11(struct_yolov8_ob_algoResult *result)
+// GPIO control function with noise filtering using counters for LED, PA2, and PA3
+static void gpio_control(struct_yolov8_ob_algoResult *result)
 {
 #ifdef IP_gpio
+    static int person_counter = 0;      // Counter for consecutive person detections
+    static bool gpio_state = false;    // Current GPIO state (LED, PA2, PA3)
+    
     bool person_detected = false;
     float max_person_confidence = 0.0f;
     
@@ -496,15 +532,41 @@ static void led_control_yolo11(struct_yolov8_ob_algoResult *result)
     }
     
     if (person_detected) {
-        // Person detected with >60% confidence - Turn ON LED
-        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
-        xprintf("LED ON (K2/SEN_D2) - YOLO11 Person detected (max conf: %.2f, >%.1f)\n", 
-                max_person_confidence, PERSON_DETECTION_CONFIDENCE_THRESHOLD);
+        // Person detected with high confidence - increment counter
+        person_counter++;
+        xprintf("YOLO11 Person detected (max conf: %.2f), counter: %d/%d\n", 
+                max_person_confidence, person_counter, PERSON_COUNTER_THRESHOLD);
+        
+        // Turn all GPIOs ON only after reaching threshold
+        if (person_counter >= PERSON_COUNTER_THRESHOLD && !gpio_state) {
+            hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
+            hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_HIGH);
+            hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_HIGH);
+            gpio_state = true;
+            xprintf("GPIO ON - YOLO11 LED, PA2, PA3 activated (%d consecutive detections)\n", 
+                    PERSON_COUNTER_THRESHOLD);
+        }
+        
+        // Cap the counter to avoid overflow
+        if (person_counter > PERSON_COUNTER_THRESHOLD) {
+            person_counter = PERSON_COUNTER_THRESHOLD;
+        }
     } else {
-        // No person detected with sufficient confidence - Turn OFF LED
-        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
-        xprintf("LED OFF (K2/SEN_D2) - YOLO11 No person detected (threshold: %.1f)\n", 
-                PERSON_DETECTION_CONFIDENCE_THRESHOLD);
+        // No person or low confidence - decrement counter
+        if (person_counter > 0) {
+            person_counter -= COUNTER_DECREMENT_STEP;
+            xprintf("YOLO11 No person detected, counter decreased to: %d\n", person_counter);
+        }
+        
+        // Turn all GPIOs OFF when counter reaches 0
+        if (person_counter <= 0 && gpio_state) {
+            hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+            hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_LOW);
+            hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_LOW);
+            gpio_state = false;
+            person_counter = 0;  // Ensure counter doesn't go negative
+            xprintf("GPIO OFF - YOLO11 LED, PA2, PA3 deactivated (Counter reached 0)\n");
+        }
     }
 #endif
 }
@@ -592,8 +654,8 @@ int cv_yolo11n_ob_init(bool security_enable, bool privilege_enable, uint32_t mod
 		#endif
 	}
 
-	// Initialize LED for person detection indication
-	led_init();
+	// Initialize GPIO pins (LED, PA2, PA3) for person detection indication
+	gpio_init();
 
 	xprintf("initial done\n");
 	return ercode;
@@ -727,6 +789,22 @@ static void yolo11_ob_post_processing(tflite::MicroInterpreter* static_interpret
 			dims_cnt_1 = idx / output[output_data_idx]->dims->data[1];//7
 			dims_cnt_2 = idx % output[output_data_idx]->dims->data[2];//7
 		}
+#if PERSON_ONLY_OPTIMIZATION
+		// Tối ưu hóa: Chỉ kiểm tra class "person" (class_id = 0) 
+		float person_score_no_sigmoid = yolo11_nopost_dequant_value(dims_cnt_1, dims_cnt_2, class_id_start + PERSON_CLASS_ID, output[output_data_idx]);
+		float person_score = sigmoid(person_score_no_sigmoid);
+		
+		// Chỉ xử lý nếu là person và đạt threshold
+		if (person_score >= modelScoreThreshold)
+		{
+			box bbox;
+			yolo11_nopost_cal_xywh(j,dims_cnt_1, dims_cnt_2,output[output_data_idx],&bbox, anchor_756_2,stride_756_1 );
+			boxes.push_back(bbox);
+			class_idxs.push_back(PERSON_CLASS_ID);  // Luôn là person class
+			confidences.push_back(person_score);
+		}
+#else
+		// Code gốc: Kiểm tra tất cả các class
 		float maxScore_no_sigmoid = yolo11_nopost_dequant_value(dims_cnt_1, dims_cnt_2,class_id_start,output[output_data_idx]);
 		uint16_t maxClassIndex = 0;
 		for(int class_id_cnt = class_id_start;class_id_cnt < output[output_data_idx]->dims->data[3];class_id_cnt++)
@@ -749,6 +827,8 @@ static void yolo11_ob_post_processing(tflite::MicroInterpreter* static_interpret
 			boxes.push_back(bbox);
 			class_idxs.push_back(maxClassIndex);
 			confidences.push_back(maxScore);
+		}
+#endif
 			
 		}
 	}
@@ -761,8 +841,8 @@ static void yolo11_ob_post_processing(tflite::MicroInterpreter* static_interpret
 		xprintf("boxes.size(): %d\r\n",boxes.size());
 	#endif
 	/**
-	 * do nms
-	 * 
+	 * do nms - NMS vẫn cần thiết để loại bỏ các duplicate detections
+	 * Trong PERSON_ONLY_OPTIMIZATION mode, NMS sẽ nhanh hơn vì chỉ xử lý 1 class
 	 * **/
 
 	std::vector<int> nms_result;
@@ -870,14 +950,25 @@ static void yolo11_ob_post_processing(tflite::MicroInterpreter* static_interpret
 			}
 			else
 			{
+#if PERSON_ONLY_OPTIMIZATION
 				/***
-				 * find maximum Score and correspond Class idx
+				 * Tối ưu: Chỉ kiểm tra class Person (dims_cnt_1 = 4 + PERSON_CLASS_ID = 4)
+				 * **/
+				if(dims_cnt_1 == 4 + PERSON_CLASS_ID) // Chỉ lấy score của person class
+				{
+					maxScore = deq_value;
+					maxClassIndex = PERSON_CLASS_ID;
+				}
+#else
+				/***
+				 * Code gốc: find maximum Score and correspond Class idx
 				 * **/
 				if(maxScore < deq_value)
 				{
 					maxScore = deq_value;
 					maxClassIndex = dims_cnt_1-4;
 				}
+#endif
 			}
 
 		}
@@ -1026,8 +1117,8 @@ int cv_yolo11n_ob_run(struct_yolov8_ob_algoResult *algoresult_yolo11n_ob) {
 			xprintf("yolo11_ob_post_processing done\r\n");
 		#endif
 		
-		// Control LED based on YOLO11 person detection results
-		led_control_yolo11(algoresult_yolo11n_ob);
+		// Control GPIO pins (LED, PA2, PA3) based on YOLO11 person detection results with noise filtering
+		gpio_control(algoresult_yolo11n_ob);
 		#ifdef TOTAL_STEP_TICK						
 			SystemGetTick(&systick_2, &loop_cnt_2);
 			// dbg_printf(DBG_LESS_INFO,"Tick for TOTAL YOLO11 OB:[%d]\r\n",(loop_cnt_2-loop_cnt_1)*CPU_CLK+(systick_1-systick_2));		
