@@ -47,3 +47,5 @@ we2_image_gen_local/secureboot_tool/cert/ICVSBContent_Cert.txt
 we2_image_gen_local/secureboot_tool/cert/ICVSBContent.crt
 /venv
 .DS_Store
+we2_image_gen_local/.DS_Store
+/EPII_CM55M_APP_S/prebuilt_libs

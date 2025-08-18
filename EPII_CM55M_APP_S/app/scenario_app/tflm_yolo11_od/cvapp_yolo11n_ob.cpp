@@ -107,7 +107,7 @@ static uint32_t tensor_arena=0;
 struct ethosu_driver ethosu_drv; /* Default Ethos-U device driver */
 tflite::MicroInterpreter *yolo11n_ob_int_ptr=nullptr;
 #if YOLO11_NO_POST_SEPARATE_OUTPUT
-TfLiteTensor *yolo11n_ob_input, *(yolo11n_ob_output[6]);
+TfLiteTensor *yolo11n_ob_input, *yolo11n_ob_output[6];
 #else
 TfLiteTensor *yolo11n_ob_input, *yolo11n_ob_output, *yolo11n_ob_output2;
 #endif
@@ -829,8 +829,6 @@ static void yolo11_ob_post_processing(tflite::MicroInterpreter* static_interpret
 			confidences.push_back(maxScore);
 		}
 #endif
-			
-		}
 	}
 
 	#if YOLO11_POST_EACH_STEP_TICK						
