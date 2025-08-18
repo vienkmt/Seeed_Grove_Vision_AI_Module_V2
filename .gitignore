@@ -40,3 +40,8 @@ we2_image_gen_local/Images*.txt
 
 .vscode/
 Himax_AI_web_toolkit/.DS_Store
+EPII_CM55M_APP_S/app/.DS_Store
+EPII_CM55M_APP_S/app/scenario_app/.DS_Store
+*.log
+we2_image_gen_local/secureboot_tool/cert/ICVSBContent_Cert.txt
+we2_image_gen_local/secureboot_tool/cert/ICVSBContent.crt

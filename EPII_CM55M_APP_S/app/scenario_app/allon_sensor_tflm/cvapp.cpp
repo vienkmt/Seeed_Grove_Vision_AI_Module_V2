@@ -39,9 +39,17 @@
 // LED Configuration - K2 maps to SEN_D2 which can be configured as GPIO20
 #define LED_GPIO_PIN    GPIO20
 
+// PA2 and PA3 GPIO Configuration
+#define PA2_GPIO_PIN    SB_GPIO0    // PA2 can be configured as SB_GPIO0
+#define PA3_GPIO_PIN    SB_GPIO1    // PA3 can be configured as SB_GPIO1
+
 // LED threshold - 70% confidence for person detection
 // With int8 range (-128 to +127), 70% ≈ +55
 #define PERSON_DETECTION_THRESHOLD  55
+
+// Counter thresholds for noise filtering
+#define PERSON_COUNTER_THRESHOLD    20  // Need 20 consecutive detections to turn LED on
+#define COUNTER_DECREMENT_STEP      1   // Decrement by 1 when no person detected
 
 #define LOCAL_FRAQ_BITS (8)
 #define SC(A, B) ((A<<8)/B)
@@ -169,38 +177,83 @@ static int _arm_npu_init(bool security_enable, bool privilege_enable)
     return 0;
 }
 
-// LED initialization function
-static void led_init(void)
+// GPIO initialization function for LED, PA2, and PA3
+static void gpio_init(void)
 {
 #ifdef IP_gpio
     // Configure pinmux for LED - K2 corresponds to SEN_D2 pin
     // Map SEN_D2 to GPIO20 function
     hx_drv_scu_set_SEN_D2_pinmux(SCU_SEN_D2_PINMUX_GPIO20);
     
-    // Configure GPIO20 as output
+    // Configure PA2 pin as SB_GPIO0
+    hx_drv_scu_set_PA2_pinmux(SCU_PA2_PINMUX_SB_GPIO0, 1);
+    
+    // Configure PA3 pin as SB_GPIO1  
+    hx_drv_scu_set_PA3_pinmux(SCU_PA3_PINMUX_SB_GPIO1, 1);
+    
+    // Initialize GPIO Group 4 for SB_GPIO (PA2/PA3)
+    hx_drv_gpio_init(GPIO_GROUP_4, HX_GPIO_GROUP_4_BASE);
+    
+    // Configure all pins as output with initial low state
     hx_drv_gpio_set_output(LED_GPIO_PIN, GPIO_OUT_LOW);
     hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
     
-    xprintf("LED GPIO initialized on K2 (SEN_D2 -> GPIO20)\n");
+    hx_drv_gpio_set_output(PA2_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_LOW);
+    
+    hx_drv_gpio_set_output(PA3_GPIO_PIN, GPIO_OUT_LOW);
+    hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_LOW);
+    
+    xprintf("GPIO initialized: LED on K2 (SEN_D2->GPIO20), PA2->SB_GPIO0, PA3->SB_GPIO1\n");
 #else
     xprintf("GPIO support not enabled\n");
 #endif
 }
 
-// LED control function based on person detection
-static void led_control(int8_t person_score)
+// GPIO control function with noise filtering using counters for LED, PA2, and PA3
+static void gpio_control(int8_t person_score)
 {
 #ifdef IP_gpio
+    static int person_counter = 0;      // Counter for consecutive person detections
+    static bool gpio_state = false;    // Current GPIO state (LED, PA2, PA3)
+    
     if (person_score > PERSON_DETECTION_THRESHOLD) {
-        // Person detected with 70%+ confidence - Turn ON LED
-        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
-        xprintf("LED ON (K2/SEN_D2) - High confidence person (score: %d, >%d)\n", 
-                person_score, PERSON_DETECTION_THRESHOLD);
+        // Person detected with high confidence - increment counter
+        person_counter++;
+        xprintf("Person detected (score: %d), counter: %d/%d\n", 
+                person_score, person_counter, PERSON_COUNTER_THRESHOLD);
+        
+        // Turn all GPIOs ON only after reaching threshold
+        if (person_counter >= PERSON_COUNTER_THRESHOLD && !gpio_state) {
+            hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_HIGH);
+            hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_HIGH);
+            hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_HIGH);
+            gpio_state = true;
+            xprintf("GPIO ON - LED, PA2, PA3 activated (%d consecutive detections)\n", 
+                    PERSON_COUNTER_THRESHOLD);
+        }
+        
+        // Cap the counter to avoid overflow
+        if (person_counter > PERSON_COUNTER_THRESHOLD) {
+            person_counter = PERSON_COUNTER_THRESHOLD;
+        }
     } else {
-        // Low confidence or no person - Turn OFF LED  
-        hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
-        xprintf("LED OFF (K2/SEN_D2) - Low confidence (score: %d, <=%d)\n", 
-                person_score, PERSON_DETECTION_THRESHOLD);
+        // No person or low confidence - decrement counter
+        if (person_counter > 0) {
+            person_counter -= COUNTER_DECREMENT_STEP;
+            xprintf("No person (score: %d), counter decreased to: %d\n", 
+                    person_score, person_counter);
+        }
+        
+        // Turn all GPIOs OFF when counter reaches 0
+        if (person_counter <= 0 && gpio_state) {
+            hx_drv_gpio_set_out_value(LED_GPIO_PIN, GPIO_OUT_LOW);
+            hx_drv_gpio_set_out_value(PA2_GPIO_PIN, GPIO_OUT_LOW);
+            hx_drv_gpio_set_out_value(PA3_GPIO_PIN, GPIO_OUT_LOW);
+            gpio_state = false;
+            person_counter = 0;  // Ensure counter doesn't go negative
+            xprintf("GPIO OFF - LED, PA2, PA3 deactivated (Counter reached 0)\n");
+        }
     }
 #endif
 }
@@ -246,8 +299,8 @@ int cv_init(bool security_enable, bool privilege_enable)
 	input = static_interpreter.input(0);
 	output = static_interpreter.output(0);
 
-	// Initialize LED for person detection indication
-	led_init();
+	// Initialize GPIO pins (LED, PA2, PA3) for person detection indication
+	gpio_init();
 
 	xprintf("initial done\n");
 
@@ -257,10 +310,10 @@ int cv_init(bool security_enable, bool privilege_enable)
 int cv_run() {
 	int ercode = 0;
 	
-	// Timing measurement
-	uint32_t start_time = hx_drv_timer_cm55x_get_current_time_us();
-	static uint32_t frame_count = 0;
-	static uint32_t last_fps_time = 0;
+	// Timing measurement (commented out due to missing timer function)
+	// uint32_t start_time = hx_drv_timer_cm55x_get_current_time_us();
+	// static uint32_t frame_count = 0;
+	// static uint32_t last_fps_time = 0;
 
 	//give image to input tensor
 	img_rescale((uint8_t*)app_get_raw_addr(), app_get_raw_width(), app_get_raw_height(), INPUT_SIZE_X, INPUT_SIZE_Y,
@@ -278,12 +331,12 @@ int cv_run() {
 
 	//retrieve output data
 	int8_t person_score = output->data.int8[1];
-	int8_t no_person_score = output->data.int8[0];
+	// int8_t no_person_score = output->data.int8[0];  // Unused variable
 
 	xprintf("person_score:%d\n",person_score);
 	
-	// Control LED based on person detection
-	led_control(person_score);
+	// Control GPIO pins (LED, PA2, PA3) based on person detection
+	gpio_control(person_score);
 	
 	//error_reporter->Report(
 	//	   "person score: %d, no person score: %d\n", person_score,
